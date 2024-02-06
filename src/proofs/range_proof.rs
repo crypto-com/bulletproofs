@@ -21,7 +21,7 @@ use curv::arithmetic::traits::*;
 use curv::cryptographic_primitives::hashing::{Digest, DigestExt};
 use curv::elliptic::curves::{secp256_k1::Secp256k1, Curve, ECPoint, Point, Scalar};
 use curv::BigInt;
-use sha2::Sha256;
+use sha2::{Sha256, Sha512};
 
 use generic_array::{typenum::Unsigned, GenericArray};
 use itertools::iterate;
@@ -247,8 +247,20 @@ impl RangeProof {
         // private input: a,b  = Lp,Rp
         let L_vec = Vec::with_capacity(nm);
         let R_vec = Vec::with_capacity(nm);
-        let inner_product_proof =
-            InnerProductArg::prove(&g_vec, &hi_tag, &Gx, &P, &Lp, &Rp, L_vec, R_vec);
+
+        let inner_product_proof: InnerProductArg;
+        if bit_length != bit_length.next_power_of_two() {
+            let nm = num_of_proofs * bit_length.next_power_of_two();
+            let g_vec = Self::pad_generators(&g_vec, nm);
+            let hi_tag = Self::pad_generators(&hi_tag, nm);
+            let Lp = Self::pad_inputs(&Lp, nm);
+            let Rp = Self::pad_inputs(&Rp, nm);
+            let L_vec = Vec::with_capacity(nm);
+            let R_vec = Vec::with_capacity(nm);
+            inner_product_proof = InnerProductArg::prove(&g_vec, &hi_tag, &Gx, &P, &Lp, &Rp, L_vec, R_vec);
+        } else {
+            inner_product_proof = InnerProductArg::prove(&g_vec, &hi_tag, &Gx, &P, &Lp, &Rp, L_vec, R_vec);
+        }
 
         RangeProof {
             A,
@@ -389,12 +401,47 @@ impl RangeProof {
         let P = (0..nm)
             .map(|i| &g_vec[i] * &z_minus_fe)
             .fold(P1, |acc, x| acc + x);
-        let verify = self.inner_product_proof.verify(g_vec, &hi_tag, &Gx, &P);
+
+        let verify;
+        if bit_length != bit_length.next_power_of_two() {
+            let nm = num_of_proofs * bit_length.next_power_of_two();
+            let g_vec = Self::pad_generators(&g_vec.to_vec(), nm);
+            let hi_tag = Self::pad_generators(&hi_tag, nm);
+            verify = self.inner_product_proof.verify(&g_vec, &hi_tag, &Gx, &P);
+        } else {
+            verify = self.inner_product_proof.verify(g_vec, &hi_tag, &Gx, &P);
+        }
+
         if verify.is_ok() && left_side == right_side {
             Ok(())
         } else {
             Err(RangeProofError)
         }
+    }
+
+    fn pad_generators(g: &Vec<Point<Secp256k1>>, new_nm: usize) -> Vec<Point<Secp256k1>> {
+        let mut g_out = Vec::with_capacity(new_nm);
+        for i in 0..new_nm {
+            if i < g.len() {
+                g_out.push(g[i].clone());
+            } else {
+                let hash_i = Sha512::new().chain_points(&[g_out[i-1].clone()]).result_bigint();
+                g_out.push(curv::elliptic::curves::secp256_k1::hash_to_curve::generate_random_point(&Converter::to_bytes(&hash_i)));
+            }
+        }
+        g_out
+    }
+
+    fn pad_inputs(input: &Vec<BigInt>, new_nm: usize) -> Vec<BigInt> {
+        let mut input_out = Vec::with_capacity(new_nm);
+        for i in 0..new_nm {
+            if i < input.len() {
+                input_out.push(input[i].clone());
+            } else {
+                input_out.push(BigInt::from(0));
+            }
+        }
+        input_out
     }
 
     pub fn fast_verify(
@@ -1058,6 +1105,162 @@ mod tests {
     pub fn test_batch_1_range_proof_8() {
         // bit range
         let n = 8;
+        // batch size
+        let m = 1;
+        let nm = n * m;
+        // some seed for generating g and h vectors
+        let KZen: &[u8] = &[75, 90, 101, 110];
+        let kzen_label = BigInt::from_bytes(KZen);
+
+        // G,H - points for pederson commitment: com  = vG + rH
+        let G = Point::<Secp256k1>::generator();
+        let label = BigInt::from(1);
+        let hash = Sha512::new().chain_bigint(&label).result_bigint();
+        let H = generate_random_point(&Converter::to_bytes(&hash));
+
+        let g_vec = (0..nm)
+            .map(|i| {
+                let kzen_label_i = BigInt::from(i as u32) + &kzen_label;
+                let hash_i = Sha512::new().chain_bigint(&kzen_label_i).result_bigint();
+                generate_random_point(&Converter::to_bytes(&hash_i))
+            })
+            .collect::<Vec<Point<Secp256k1>>>();
+
+        // can run in parallel to g_vec:
+        let h_vec = (0..nm)
+            .map(|i| {
+                let kzen_label_j = BigInt::from(n as u32) + BigInt::from(i as u32) + &kzen_label;
+                let hash_j = Sha512::new().chain_bigint(&kzen_label_j).result_bigint();
+                generate_random_point(&Converter::to_bytes(&hash_j))
+            })
+            .collect::<Vec<Point<Secp256k1>>>();
+
+        let range = BigInt::from(2).pow(n as u32);
+        let v_vec = (0..m)
+            .map(|_| Scalar::<Secp256k1>::from(&BigInt::sample_below(&range)))
+            .collect::<Vec<Scalar<Secp256k1>>>();
+
+        let r_vec = (0..m)
+            .map(|_| Scalar::<Secp256k1>::random())
+            .collect::<Vec<Scalar<Secp256k1>>>();
+
+        let ped_com_vec = (0..m)
+            .map(|i| &*G * &v_vec[i] + &H * &r_vec[i])
+            .collect::<Vec<Point<Secp256k1>>>();
+
+        let range_proof = RangeProof::prove(&g_vec, &h_vec, &G, &H, v_vec, &r_vec, n);
+        let result = RangeProof::verify(&range_proof, &g_vec, &h_vec, &G, &H, &ped_com_vec, n);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    pub fn test_batch_1_range_proof_6() {
+        // bit range
+        let n = 6;
+        // batch size
+        let m = 1;
+        let nm = n * m;
+        // some seed for generating g and h vectors
+        let KZen: &[u8] = &[75, 90, 101, 110];
+        let kzen_label = BigInt::from_bytes(KZen);
+
+        // G,H - points for pederson commitment: com  = vG + rH
+        let G = Point::<Secp256k1>::generator();
+        let label = BigInt::from(1);
+        let hash = Sha512::new().chain_bigint(&label).result_bigint();
+        let H = generate_random_point(&Converter::to_bytes(&hash));
+
+        let g_vec = (0..nm)
+            .map(|i| {
+                let kzen_label_i = BigInt::from(i as u32) + &kzen_label;
+                let hash_i = Sha512::new().chain_bigint(&kzen_label_i).result_bigint();
+                generate_random_point(&Converter::to_bytes(&hash_i))
+            })
+            .collect::<Vec<Point<Secp256k1>>>();
+
+        // can run in parallel to g_vec:
+        let h_vec = (0..nm)
+            .map(|i| {
+                let kzen_label_j = BigInt::from(n as u32) + BigInt::from(i as u32) + &kzen_label;
+                let hash_j = Sha512::new().chain_bigint(&kzen_label_j).result_bigint();
+                generate_random_point(&Converter::to_bytes(&hash_j))
+            })
+            .collect::<Vec<Point<Secp256k1>>>();
+
+        let range = BigInt::from(2).pow(n as u32);
+        let v_vec = (0..m)
+            .map(|_| Scalar::<Secp256k1>::from(&BigInt::sample_below(&range)))
+            .collect::<Vec<Scalar<Secp256k1>>>();
+
+        let r_vec = (0..m)
+            .map(|_| Scalar::<Secp256k1>::random())
+            .collect::<Vec<Scalar<Secp256k1>>>();
+
+        let ped_com_vec = (0..m)
+            .map(|i| &*G * &v_vec[i] + &H * &r_vec[i])
+            .collect::<Vec<Point<Secp256k1>>>();
+
+        let range_proof = RangeProof::prove(&g_vec, &h_vec, &G, &H, v_vec, &r_vec, n);
+        let result = RangeProof::verify(&range_proof, &g_vec, &h_vec, &G, &H, &ped_com_vec, n);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    pub fn test_batch_4_range_proof_20() {
+        // bit range
+        let n = 20;
+        // batch size
+        let m = 4;
+        let nm = n * m;
+        // some seed for generating g and h vectors
+        let KZen: &[u8] = &[75, 90, 101, 110];
+        let kzen_label = BigInt::from_bytes(KZen);
+
+        // G,H - points for pederson commitment: com  = vG + rH
+        let G = Point::<Secp256k1>::generator();
+        let label = BigInt::from(1);
+        let hash = Sha512::new().chain_bigint(&label).result_bigint();
+        let H = generate_random_point(&Converter::to_bytes(&hash));
+
+        let g_vec = (0..nm)
+            .map(|i| {
+                let kzen_label_i = BigInt::from(i as u32) + &kzen_label;
+                let hash_i = Sha512::new().chain_bigint(&kzen_label_i).result_bigint();
+                generate_random_point(&Converter::to_bytes(&hash_i))
+            })
+            .collect::<Vec<Point<Secp256k1>>>();
+
+        // can run in parallel to g_vec:
+        let h_vec = (0..nm)
+            .map(|i| {
+                let kzen_label_j = BigInt::from(n as u32) + BigInt::from(i as u32) + &kzen_label;
+                let hash_j = Sha512::new().chain_bigint(&kzen_label_j).result_bigint();
+                generate_random_point(&Converter::to_bytes(&hash_j))
+            })
+            .collect::<Vec<Point<Secp256k1>>>();
+
+        let range = BigInt::from(2).pow(n as u32);
+        let v_vec = (0..m)
+            .map(|_| Scalar::<Secp256k1>::from(&BigInt::sample_below(&range)))
+            .collect::<Vec<Scalar<Secp256k1>>>();
+
+        let r_vec = (0..m)
+            .map(|_| Scalar::<Secp256k1>::random())
+            .collect::<Vec<Scalar<Secp256k1>>>();
+
+        let ped_com_vec = (0..m)
+            .map(|i| &*G * &v_vec[i] + &H * &r_vec[i])
+            .collect::<Vec<Point<Secp256k1>>>();
+
+        let range_proof = RangeProof::prove(&g_vec, &h_vec, &G, &H, v_vec, &r_vec, n);
+        let result = RangeProof::verify(&range_proof, &g_vec, &h_vec, &G, &H, &ped_com_vec, n);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    pub fn test_batch_1_range_proof_192() {
+        // bit range
+        let n = 192;
         // batch size
         let m = 1;
         let nm = n * m;
