@@ -26,10 +26,10 @@ use Errors::{self, InnerProductError};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InnerProductArg {
-    pub(super) L: Vec<Point<Secp256k1>>,
-    pub(super) R: Vec<Point<Secp256k1>>,
-    pub(super) a_tag: BigInt,
-    pub(super) b_tag: BigInt,
+    pub L: Vec<Point<Secp256k1>>,
+    pub R: Vec<Point<Secp256k1>>,
+    pub a_tag: BigInt,
+    pub b_tag: BigInt,
 }
 
 impl InnerProductArg {

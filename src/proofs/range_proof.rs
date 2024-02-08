@@ -31,14 +31,14 @@ use Errors::{self, RangeProofError};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RangeProof {
-    A: Point<Secp256k1>,
-    S: Point<Secp256k1>,
-    T1: Point<Secp256k1>,
-    T2: Point<Secp256k1>,
-    tau_x: Scalar<Secp256k1>,
-    miu: Scalar<Secp256k1>,
-    tx: Scalar<Secp256k1>,
-    inner_product_proof: InnerProductArg,
+    pub  A: Point<Secp256k1>,
+    pub S: Point<Secp256k1>,
+    pub T1: Point<Secp256k1>,
+    pub T2: Point<Secp256k1>,
+    pub tau_x: Scalar<Secp256k1>,
+    pub miu: Scalar<Secp256k1>,
+    pub tx: Scalar<Secp256k1>,
+    pub inner_product_proof: InnerProductArg,
 }
 
 impl RangeProof {
